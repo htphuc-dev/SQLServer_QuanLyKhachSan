@@ -356,4 +356,144 @@ Trạng thái đặt phòng chỉ được nhận một trong bốn giá trị:
 Việc này giúp dữ liệu không bị nhập sai hoặc thiếu thống nhất.
 
 
+# PHẦN 2 - FUNCTION (HÀM XỬ LÝ NGHIỆP VỤ)
+
+**Bản chất chung của Function:** Dùng để đóng gói các công thức tính toán hoặc logic truy xuất dữ liệu để tái sử dụng. 
+**Nguyên tắc cốt lõi:** Function **KHÔNG** được phép làm thay đổi trạng thái dữ liệu của hệ thống (Tuyệt đối không sử dụng `INSERT`, `UPDATE`, `DELETE` lên các bảng vật lý bên trong Function).
+
+Trong SQL Server, các hàm này được lưu trữ tại: `Database_Name -> Programmability -> Functions`. Bài tập này triển khai 3 loại Function cơ bản nhằm giải quyết các bài toán thực tế của khách sạn.
+
+## 1. Scalar-valued Function (Hàm vô hướng)
+
+- **Vị trí lưu trong SSMS:** Thư mục `Scalar-valued Functions`.
+- **Bản chất:** Nhận vào các tham số và trả về đúng **một giá trị đơn duy nhất** (kiểu INT, MONEY, VARCHAR...). Thân hàm được đặt trong khối `BEGIN...END`.
+- **Logic thực tế:** Tính số tiền cuối cùng khách phải trả khi check-out. Logic yêu cầu lấy số ngày ở nhân với giá phòng, sau đó trừ đi khoản tiền khách đã cọc. Nếu khách nhận và trả trong cùng một ngày, hệ thống vẫn phải tính tròn là 1 ngày lưu trú.
+- **Nhận xét hiệu năng:** Kém nếu gọi hàm này trong câu lệnh `SELECT` áp dụng cho hàng chục ngàn dòng. Hệ thống sẽ phải gọi hàm này lặp đi lặp lại cho từng dòng (hiện tượng thắt cổ chai RBAR). Chỉ nên dùng cho các truy vấn tính toán nhỏ lẻ.
+
+```sql
+CREATE FUNCTION dbo.fn_TinhTienCanThanhToan (@MaDatPhong INT)
+RETURNS MONEY
+AS
+BEGIN
+    DECLARE @TongTien MONEY;
+    DECLARE @SoNgay INT;
+
+    -- Lấy thông tin số ngày, giá phòng và tiền cọc
+    SELECT 
+        @SoNgay = DATEDIFF(DAY, dp.NgayNhanPhong, dp.NgayTraPhong),
+        @TongTien = (p.GiaPhong * 
+                     CASE WHEN DATEDIFF(DAY, dp.NgayNhanPhong, dp.NgayTraPhong) = 0 
+                          THEN 1 
+                          ELSE DATEDIFF(DAY, dp.NgayNhanPhong, dp.NgayTraPhong) 
+                     END) - dp.TienDatCoc
+    FROM DatPhong dp
+    INNER JOIN Phong p ON dp.MaPhong = p.MaPhong
+    WHERE dp.MaDatPhong = @MaDatPhong;
+
+    RETURN ISNULL(@TongTien, 0);
+END;
+GO
+
+```
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/33ccdc5e-1608-4211-8dab-6b598ae29f3f" />
+
+test nhanh:
+
+
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/049874c2-1c0a-492d-a305-82f9f10b759b" />
+
+
+## 2. Inline Table-valued Function (Hàm nội tuyến trả về bảng)
+- **Vị trí lưu trong SSMS:** Thư mục Table-valued Functions.
+
+**Bản chất:**  
+Trả về một bảng dữ liệu. Điểm đặc trưng là phần thân hàm **KHÔNG có `BEGIN...END`**, nó chỉ chứa duy nhất một câu lệnh `RETURN (SELECT ...)`. Nó hoạt động giống như một `VIEW` nhưng mạnh mẽ hơn vì có thể truyền tham số.
+
+**Logic thực tế:**  
+Hỗ trợ nhân viên lễ tân. Khi khách hỏi: *"Còn phòng đôi nào trống không?"*, hàm này sẽ lọc ra các phòng có tình trạng **"Trống"** theo đúng loại phòng khách yêu cầu.
+
+**Nhận xét hiệu năng:**  
+Cực kỳ tối ưu. SQL Server Query Optimizer có thể đọc *"xuyên"* qua cấu trúc hàm này để tối ưu Execution Plan và sử dụng Index hiệu quả.  
+👉 **Luôn ưu tiên dùng loại này thay vì Multi-statement TVF nếu có thể.**
+
+```sql
+CREATE FUNCTION dbo.fn_TimPhongTrong (@LoaiPhong NVARCHAR(50))
+RETURNS TABLE
+AS
+RETURN (
+    SELECT 
+        SoPhong, 
+        GiaPhong, 
+        DienTich
+    FROM Phong
+    WHERE TinhTrang = N'Trống' 
+      AND LoaiPhong = @LoaiPhong
+);
+GO
+```
+
+
+<img width="1920" height="1080" alt="Screenshot 2026-04-30 165817" src="https://github.com/user-attachments/assets/42996642-288f-4b54-9797-2914bcab43c6" />
+
+test nhanh:
+```sql
+SELECT * FROM dbo.fn_TimPhongTrong(N'Phòng đôi');
+```
+
+<img width="1920" height="1080" alt="Screenshot 2026-04-30 165853" src="https://github.com/user-attachments/assets/6f2a4ebd-c0d1-42ba-8f59-a4ced3a1b4ba" />
+
+
+## 3. Multi-statement Table-valued Function (Hàm đa lệnh trả về bảng)
+
+- **Vị trí lưu trong SSMS:** Thư mục Table-valued Functions.
+
+**Bản chất:**  
+Trả về một bảng dữ liệu, nhưng cấu trúc của bảng trả về phải được định nghĩa rõ ràng ngay từ đầu. Phần thân hàm có `BEGIN...END`, cho phép sử dụng các cấu trúc rẽ nhánh `IF...ELSE`, khai báo biến, và bắt buộc dùng lệnh `INSERT` để đẩy dữ liệu vào bảng tạm trước khi gọi `RETURN`.
+
+**Logic thực tế:**  
+Đánh giá phân hạng khách hàng. Hệ thống cần đếm số lần đặt phòng của từng khách. Nếu số lượt đặt >= 3 thì gán mác **"Khách VIP"**, ngược lại là **"Khách Thường"**. Logic rẽ nhánh này rất khó viết gọn trong một câu lệnh `SELECT`.
+
+**Nhận xét hiệu năng:**  
+Trung bình đến thấp. Do SQL Server phải tạo một biến bảng (Table Variable) trong bộ nhớ, nó không dự đoán được chính xác số lượng dòng trả về. Điều này dễ dẫn đến việc Query Optimizer chọn kế hoạch thực thi không tối ưu khi `JOIN` với các bảng lớn khác.
+
+```sql
+CREATE FUNCTION dbo.fn_PhanLoaiKhachHang ()
+RETURNS @BangKetQua TABLE 
+(
+    MaKhachHang INT,
+    HoTen NVARCHAR(100),
+    SoLuotDat INT,
+    PhanHang NVARCHAR(50)
+)
+AS
+BEGIN
+    -- 1. Insert dữ liệu thô và đếm số lượt đặt vào bảng tạm
+    INSERT INTO @BangKetQua (MaKhachHang, HoTen, SoLuotDat)
+    SELECT 
+        kh.MaKhachHang, 
+        kh.HoTen, 
+        COUNT(dp.MaDatPhong)
+    FROM KhachHang kh
+    LEFT JOIN DatPhong dp ON kh.MaKhachHang = dp.MaKhachHang
+    GROUP BY kh.MaKhachHang, kh.HoTen;
+
+    -- 2. Cập nhật logic phân hạng
+    UPDATE @BangKetQua
+    SET PhanHang = N'Khách VIP'
+    WHERE SoLuotDat >= 3;
+
+    UPDATE @BangKetQua
+    SET PhanHang = N'Khách Thường'
+    WHERE SoLuotDat < 3;
+
+    RETURN;
+END;
+
+```
+-- Lệnh kiểm tra (Test):
+```sql
+SELECT * FROM dbo.fn_PhanLoaiKhachHang() ORDER BY SoLuotDat DESC;
+```
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/796bdcf6-0e63-4d55-8ec8-fa9eebb16b12" />
+
 
