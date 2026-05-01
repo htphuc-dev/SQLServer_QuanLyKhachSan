@@ -4,9 +4,9 @@ SQL Server  exercise with Database Design, Functions, Stored Procedures, Trigger
 
 ## 1. Thông tin cá nhân
 
-- **Họ và tên:**  
-- **Mã sinh viên:** 
-- **Lớp:**  
+- **Họ và tên:**  Hoàng Trường Phúc
+- **Mã sinh viên:** K235480106055
+- **Lớp:**  K59KKMT.K01
 - **Môn học:** SQL Server / Hệ Quản Trị Cơ Sở Dữ Liệu  
 
 
@@ -496,4 +496,579 @@ SELECT * FROM dbo.fn_PhanLoaiKhachHang() ORDER BY SoLuotDat DESC;
 ```
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/796bdcf6-0e63-4d55-8ec8-fa9eebb16b12" />
 
+---
+
+# PHẦN 3 - STORED PROCEDURE (THỦ TỤC LƯU TRỮ)
+
+Mục tiêu của phần này là xây dựng các thủ tục lưu trữ để đóng gói các quy trình nghiệp vụ phức tạp của khách sạn xuống tầng CSDL. Việc này giúp ứng dụng chạy nhanh hơn, bảo mật hơn và dữ liệu luôn đảm bảo tính toàn vẹn (thay vì phải gọi nhiều lệnh `SELECT/INSERT/UPDATE` rời rạc từ phía Backend).
+
+## 1. Tìm hiểu System Procedure
+
+Trong SQL Server, các System Procedure được cung cấp sẵn (thường bắt đầu bằng `sp_`) để quản trị hệ thống. Trong quá trình thiết kế cơ sở dữ liệu này, em đã sử dụng:
+* `EXEC sp_help 'KhachHang';`: Để xem nhanh cấu trúc, kiểu dữ liệu và các ràng buộc của bảng.
+* `EXEC sp_helptext 'fn_TinhTienCanThanhToan';`: Để xem lại mã nguồn gốc của các Function/Procedure đã tạo.
+
+---
+
+## 2. Các Procedure nghiệp vụ đã xây dựng
+
+### 2.1. Procedure Thêm mới dữ liệu (Insert)
+- **Tên SP:** `sp_ThemKhachHang`
+- **Mục đích:** Hỗ trợ lễ tân tạo hồ sơ khách hàng mới. Tự động kiểm tra trùng lặp số điện thoại trước khi thêm để tránh tạo ra rác dữ liệu.
+**Kỹ thuật sử dụng:**  
+- Dùng `IF EXISTS` để kiểm tra dữ liệu trùng  
+- Sử dụng `RETURN` để dừng thực thi nếu có lỗi  
+- Thực hiện `INSERT` khi dữ liệu hợp lệ
+- 
+```sql
+CREATE PROCEDURE sp_ThemKhachHang
+    @HoTen NVARCHAR(100),
+    @SoDienThoai VARCHAR(15),
+    @Email VARCHAR(100) = NULL,
+    @NgaySinh DATE = NULL,
+    @DiaChi NVARCHAR(200) = NULL
+AS
+BEGIN
+    -- 1. Kiểm tra logic: Số điện thoại đã tồn tại chưa?
+    IF EXISTS (SELECT 1 FROM KhachHang WHERE SoDienThoai = @SoDienThoai)
+    BEGIN
+        PRINT N'Lỗi: Số điện thoại này đã tồn tại trong hệ thống!';
+        RETURN; -- Dừng thực thi ngay lập tức
+    END
+
+    -- 2. Thực hiện Insert
+    INSERT INTO KhachHang (HoTen, SoDienThoai, Email, NgaySinh, DiaChi)
+    VALUES (@HoTen, @SoDienThoai, @Email, @NgaySinh, @DiaChi);
+
+    PRINT N'Thêm khách hàng thành công!';
+END;
+GO
+```
+
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/0264c105-fc90-45bf-985d-bac340b3e96e" />
+
+
+-- Lệnh kiểm tra (Test):
+```sql
+-- EXEC sp_ThemKhachHang N'Nguyễn Văn A', '0912345678', 'a@gmail.com', '1995-01-01', N'Hà Nội';
+```
+
+
+
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/ebba3f45-be0f-49bd-a7ce-5f6176c96776" />
+
+
+
+
+
+## 2.2. Procedure cập nhật dữ liệu (Update) có dùng Transaction
+
+- **Tên Stored Procedure:** `sp_XuLyTraPhong`
+
+**Mục đích:**  
+Xử lý nghiệp vụ check-out. Tự động:
+- Cập nhật trạng thái hóa đơn thành **"Đã trả phòng"**
+- Giải phóng phòng (chuyển tình trạng phòng về **"Trống"**)
+
+**Kỹ thuật sử dụng:**  
+Sử dụng `BEGIN TRANSACTION` kết hợp `TRY...CATCH`.  
+Nếu cập nhật hóa đơn thành công nhưng cập nhật phòng bị lỗi, hệ thống sẽ **ROLLBACK** để đảm bảo dữ liệu luôn nhất quán.
+
+```sql
+CREATE PROCEDURE sp_XuLyTraPhong
+    @MaDatPhong INT
+AS
+BEGIN
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        -- 1. Cập nhật trạng thái trong bảng DatPhong
+        UPDATE DatPhong
+        SET TrangThai = N'Đã trả phòng'
+        WHERE MaDatPhong = @MaDatPhong;
+
+        -- 2. Lấy MaPhong từ đơn đặt
+        DECLARE @MaPhong INT;
+        SELECT @MaPhong = MaPhong 
+        FROM DatPhong 
+        WHERE MaDatPhong = @MaDatPhong;
+
+        -- 3. Cập nhật trạng thái phòng
+        UPDATE Phong
+        SET TinhTrang = N'Trống'
+        WHERE MaPhong = @MaPhong;
+
+        COMMIT TRANSACTION; -- Xác nhận thay đổi
+        PRINT N'Xử lý trả phòng thành công! Phòng đã được dọn trống.';
+    END TRY
+    BEGIN CATCH
+        ROLLBACK TRANSACTION; -- Hoàn tác nếu có lỗi
+        PRINT N'Có lỗi xảy ra, hệ thống đã hoàn tác thao tác!';
+    END CATCH
+END;
+GO
+```
+
+<img width="1920" height="1080" alt="Screenshot 2026-05-01 145245" src="https://github.com/user-attachments/assets/d988cf7b-c2f0-4a1a-95c6-b68962394280" />
+
+
+
+
+-- Lệnh kiểm tra (Test):
+```sql
+-- EXEC sp_XuLyTraPhong @MaDatPhong = 1;
+```
+
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/95efb2b9-10f7-41c5-8248-bca8f1330c52" />
+
+
+
+## 2.3. Procedure sử dụng Output Parameter
+
+- **Tên Stored Procedure:** `sp_KiemTraPhongNhanh`
+
+**Mục đích:**  
+Khi khách hỏi một phòng cụ thể (ví dụ: *"Phòng 101"*), Stored Procedure này nhận `SoPhong` làm **Input** và trả về:
+- `TinhTrang` (tình trạng phòng)
+- `GiaPhong` (giá phòng)  
+
+👉 Thông tin được trả ra thông qua **Output Parameter** để hệ thống hiển thị trực tiếp.
+
+**Kỹ thuật sử dụng:**  
+- Dùng tham số `OUTPUT` để trả dữ liệu ngược ra ngoài  
+- Sử dụng `@@ROWCOUNT` để kiểm tra trường hợp không tìm thấy phòng
+
+```sql
+CREATE PROCEDURE sp_KiemTraPhongNhanh
+    @SoPhong VARCHAR(10),
+    @TinhTrang NVARCHAR(30) OUTPUT,
+    @GiaPhong MONEY OUTPUT
+AS
+BEGIN
+    SELECT 
+        @TinhTrang = TinhTrang,
+        @GiaPhong = GiaPhong
+    FROM Phong
+    WHERE SoPhong = @SoPhong;
+
+    -- Xử lý trường hợp không tìm thấy phòng
+    IF @@ROWCOUNT = 0
+    BEGIN
+        SET @TinhTrang = N'Không tìm thấy phòng';
+        SET @GiaPhong = 0;
+    END
+END;
+GO
+```
+
+
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/57be4c66-f8f2-4c44-bd93-41baf1d2aef1" />
+
+-- Lệnh kiểm tra (Test):
+```sql
+ DECLARE @TinhTrangTraVe NVARCHAR(30), @GiaTraVe MONEY;
+EXEC sp_KiemTraPhongNhanh '101', @TinhTrangTraVe OUTPUT, @GiaTraVe OUTPUT;
+SELECT @TinhTrangTraVe AS TinhTrangPhong, @GiaTraVe AS GiaTien;
+
+```
+
+
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/e1505cf2-732c-4eff-b6b5-602dd984be5c" />
+
+
+
+
+## 2.4. Procedure trả về Result Set (Kết hợp Function)
+
+- **Tên Stored Procedure:** `sp_TraCuuLichSuDatPhong`
+
+**Mục đích:**  
+Hiển thị danh sách chi tiết các lần lưu trú của một khách hàng.  
+Điểm đặc biệt: Stored Procedure này **gọi lại Function** `fn_TinhTienCanThanhToan` để tự động tính tổng tiền cho từng đơn đặt phòng.
+
+**Kỹ thuật sử dụng:**  
+- Trả về **Result Set** (bảng dữ liệu) thông qua câu lệnh `SELECT`  
+- Kết hợp với **Scalar Function** để tái sử dụng logic tính toán  
+- Sử dụng `JOIN` để liên kết nhiều bảng
+
+```sql
+CREATE PROCEDURE sp_TraCuuLichSuDatPhong
+    @MaKhachHang INT
+AS
+BEGIN
+    SELECT 
+        dp.MaDatPhong,
+        p.SoPhong,
+        p.LoaiPhong,
+        dp.NgayNhanPhong,
+        dp.NgayTraPhong,
+        dp.TrangThai,
+        -- Gọi lại Function để tính tổng tiền
+        dbo.fn_TinhTienCanThanhToan(dp.MaDatPhong) AS TongTien
+    FROM DatPhong dp
+    INNER JOIN Phong p ON dp.MaPhong = p.MaPhong
+    WHERE dp.MaKhachHang = @MaKhachHang
+    ORDER BY dp.NgayNhanPhong DESC; -- Ngày gần nhất trước
+END;
+GO
+```
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/9b1efbc0-8ec5-4121-bacc-b40eea7529bf" />
+
+
+
+Lệnh kiểm tra (Test):
+```sql
+EXEC sp_TraCuuLichSuDatPhong @MaKhachHang = 1;
+```
+
+
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/e9d46648-3004-413b-bcc3-0ead80123297" />
+
+
+---
+
+# PHẦN 4 - TRIGGER (BẪY LỖI VÀ TỰ ĐỘNG HÓA)
+
+Mục tiêu của phần này là sử dụng Trigger để tự động hóa các quy trình thay đổi trạng thái dữ liệu ngầm bên dưới hệ thống, giúp đảm bảo tính nhất quán của cơ sở dữ liệu mà ứng dụng không cần phải gọi thêm bất kỳ câu lệnh nào.
+
+Khác với Stored Procedure phải được gọi thủ công (`EXEC`), Trigger sẽ tự động được kích hoạt khi có sự kiện `INSERT`, `UPDATE`, hoặc `DELETE` xảy ra trên một bảng.
+
+## 1. Chuẩn bị: Tạo bảng Nhật Ký (Log)
+
+Để quan sát rõ hiện tượng **Trigger lồng nhau (Nested Triggers)**, em thiết kế thêm một bảng `NhatKyPhong` để hệ thống tự động ghi lại lịch sử mỗi khi một phòng thay đổi tình trạng.
+```sql
+CREATE TABLE [NhatKyPhong] (
+    [MaLog] INT IDENTITY(1,1) PRIMARY KEY,
+    [MaPhong] INT NOT NULL,
+    [HanhDong] NVARCHAR(255) NOT NULL,
+    [ThoiGian] DATETIME DEFAULT GETDATE()
+);
+GO
+```
+
+## 2. Các Trigger đã xây dựng
+
+### 2.1. Trigger tự động cập nhật dữ liệu giữa các bảng
+
+- **Tên Trigger:** `trg_DatPhong_CapNhatTrangThai`  
+- **Gắn trên bảng:** `DatPhong`
+
+**Mục đích:**  
+Khi một bản ghi trong `DatPhong` được:
+- Thêm mới (khách đặt phòng)
+- Cập nhật (khách hủy / trả phòng)
+
+👉 Hệ thống sẽ tự động cập nhật bảng `Phong` để thay đổi **Tình trạng phòng** tương ứng (*Đã đặt / Trống*).
+
+**Kỹ thuật sử dụng:**  
+- Sử dụng bảng ảo `inserted` để lấy dữ liệu vừa được thêm/cập nhật  
+- Dùng `JOIN` để xử lý đúng trong trường hợp **nhiều dòng bị ảnh hưởng cùng lúc**  
+- Sử dụng `SET NOCOUNT ON` để tối ưu hiệu năng
+
+```sql
+CREATE TRIGGER trg_DatPhong_CapNhatTrangThai
+ON DatPhong
+AFTER INSERT, UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON; -- Giảm thông báo số dòng bị ảnh hưởng
+
+    -- 1. Khách đặt phòng
+    UPDATE p
+    SET p.TinhTrang = N'Đã đặt'
+    FROM Phong p
+    INNER JOIN inserted i ON p.MaPhong = i.MaPhong
+    WHERE i.TrangThai = N'Đã đặt';
+
+    -- 2. Khách trả phòng hoặc hủy phòng
+    UPDATE p
+    SET p.TinhTrang = N'Trống'
+    FROM Phong p
+    INNER JOIN inserted i ON p.MaPhong = i.MaPhong
+    WHERE i.TrangThai IN (N'Đã trả phòng', N'Đã hủy');
+END;
+GO
+```
+
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/4d85fa40-8e1e-4b3b-881d-eed95e344dfb" />
+
+
+### 2.2. Trigger ghi log (Quan sát Trigger lồng nhau)
+
+- **Tên Trigger:** `trg_Phong_GhiLogThayDoi`  
+- **Gắn trên bảng:** `Phong`
+
+**Mục đích:**  
+Giám sát bảng `Phong`.  
+Mỗi khi cột **TinhTrang** bị thay đổi, Trigger sẽ tự động ghi lại lịch sử vào bảng `NhatKyPhong`.
+
+**Kỹ thuật sử dụng:**  
+- Sử dụng đồng thời:
+  - `inserted` → chứa **giá trị mới**
+  - `deleted` → chứa **giá trị cũ**  
+- Dùng `IF UPDATE(TinhTrang)` để chỉ chạy khi đúng cột bị thay đổi  
+- So sánh dữ liệu cũ và mới để tránh ghi log dư thừa
+
+```sql
+CREATE TRIGGER trg_Phong_GhiLogThayDoi
+ON Phong
+AFTER UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Chỉ xử lý khi cột TinhTrang bị cập nhật
+    IF UPDATE(TinhTrang)
+    BEGIN
+        INSERT INTO NhatKyPhong (MaPhong, HanhDong)
+        SELECT 
+            i.MaPhong,
+            N'Tình trạng phòng thay đổi từ [' 
+            + d.TinhTrang 
+            + N'] sang [' 
+            + i.TinhTrang 
+            + N']'
+        FROM inserted i
+        INNER JOIN deleted d 
+            ON i.MaPhong = d.MaPhong
+        -- Chỉ ghi log khi có thay đổi thực sự
+        WHERE i.TinhTrang <> d.TinhTrang;
+    END
+END;
+GO
+```
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/1867f485-5d24-4593-86eb-4b4b1428f868" />
+
+## . Kiểm tra (Test) hoạt động của Trigger và hiệu ứng lồng nhau
+
+Để chứng minh hệ thống Trigger hoạt động chính xác theo chuỗi (*domino*), thực hiện kịch bản test sau:  
+
+👉 **Giả lập trường hợp một khách hàng gọi điện yêu cầu hủy đơn đặt phòng số 1 (`MaDatPhong = 1`).**
+
+---
+
+### Bước 1: Xem trạng thái trước khi test
+
+Trước khi thao tác, kiểm tra trạng thái hiện tại của:
+- Đơn đặt phòng  
+- Phòng  
+- Bảng nhật ký  
+
+-Đưa đơn số 1 về trạng thái Đã đặt
+```sql
+UPDATE DatPhong SET TrangThai = N'Đã đặt' WHERE MaDatPhong = 1;
+```
+-- Xóa dữ liệu cũ trong bảng Log (nếu có)
+```sql
+TRUNCATE TABLE NhatKyPhong;
+```
+```sql
+-- Xem trạng thái đơn đặt
+SELECT MaDatPhong, TrangThai 
+FROM DatPhong 
+WHERE MaDatPhong = 1;
+```
+-- Giả sử: TrangThai = 'Đã đặt'
+
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/d3ac7970-86fb-4925-a20e-196a8256abf3" />
+
+
+-- Xem trạng thái phòng tương ứng
+```sql
+SELECT MaPhong, SoPhong, TinhTrang 
+FROM Phong 
+WHERE MaPhong = 1;
+-- Giả sử: TinhTrang = 'Đã đặt'
+```
+-- Xem bảng log
+```sql
+SELECT * 
+FROM NhatKyPhong;
+-- Kết quả: Bảng đang trống (0 rows)
+```
+
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/6af0f322-6c5b-40dd-b28a-af1f948a1b71" />
+
+
+Bước 2: Thực thi lệnh UPDATE (kích hoạt Trigger)
+
+Nhân viên lễ tân cập nhật trạng thái đơn đặt phòng thành "Đã hủy".
+👉 Chỉ cần chạy duy nhất 1 câu lệnh:
+```sql
+UPDATE DatPhong
+SET TrangThai = N'Đã hủy'
+WHERE MaDatPhong = 1;
+```
+
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/15c072e5-2310-4bf2-9df9-f246d1c5e301" />
+
+Bước 3: Kiểm tra kết quả sau khi Trigger chạy
+
+Sau khi thực hiện lệnh UPDATE, hệ thống không chỉ thay đổi bảng DatPhong mà các Trigger đã tự động xử lý dây chuyền.
+
+```sql
+SELECT MaPhong, SoPhong, TinhTrang 
+FROM Phong 
+WHERE MaPhong = 1;
+-- KẾT QUẢ: TinhTrang = 'Trống' (Trigger 2.1 hoạt động)
+
+SELECT * 
+FROM NhatKyPhong;
+-- KẾT QUẢ: Xuất hiện 1 dòng log:
+-- "Tình trạng phòng thay đổi từ [Đã đặt] sang [Trống]" (Trigger 2.2 hoạt động)
+
+```
+
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/1576aeed-720e-44e8-bb03-01d7122176d5" />
+
+
+Chuỗi xử lý tự động diễn ra như sau:
+
+UPDATE DatPhong
+➝ Trigger trg_DatPhong_CapNhatTrangThai chạy
+➝ Cập nhật bảng Phong
+➝ Trigger trg_Phong_GhiLogThayDoi chạy
+➝ Ghi log vào NhatKyPhong
+
+👉 Chỉ 1 câu lệnh nhưng kích hoạt nhiều hành động liên tiếp (Trigger lồng nhau).
+
+---
+
+# PHẦN 5 - CURSOR (CON TRỎ DỮ LIỆU)
+
+Mục tiêu của phần này là áp dụng kỹ thuật Cursor để xử lý dữ liệu theo từng dòng (Row-by-row) thay vì xử lý theo tập hợp (Set-based) như các câu lệnh SQL thông thường. 
+
+Mặc dù Cursor tốn tài nguyên hệ thống hơn, nhưng nó rất hữu ích trong các nghiệp vụ yêu cầu tính toán phức tạp phụ thuộc vào từng cá nhân, hoặc khi cần mô phỏng các tác vụ hệ thống như gửi Email, in sao kê tuần tự.
+
+## 1. Xây dựng kịch bản dùng Cursor
+
+**Nghiệp vụ:** Chạy chiến dịch tri ân khách hàng cuối năm. Hệ thống sẽ duyệt qua danh sách từng khách hàng, tính toán tổng số tiền họ đã chi tiêu tại khách sạn (gọi lại Function đã tạo ở Phần 2). Nếu khách có chi tiêu, hệ thống sẽ tự động in ra một thông báo mô phỏng việc gửi Email tặng mã giảm giá.
+
+
+### Mã nguồn thực thi Cursor :
+```sql
+-- Chuẩn bị biến lưu trữ dữ liệu cho từng dòng
+DECLARE @MaKhachHang INT;
+DECLARE @HoTen NVARCHAR(100);
+DECLARE @Email VARCHAR(100);
+DECLARE @TongChiTieu MONEY;
+
+-- BƯỚC 1: DECLARE - Khai báo Cursor lấy danh sách khách hàng
+DECLARE cur_ChienDichTriAn CURSOR FOR
+SELECT MaKhachHang, HoTen, Email
+FROM KhachHang;
+
+-- BƯỚC 2: OPEN - Mở Cursor để nạp dữ liệu vào bộ nhớ
+OPEN cur_ChienDichTriAn;
+
+-- BƯỚC 3: FETCH NEXT - Đọc dòng dữ liệu đầu tiên
+FETCH NEXT FROM cur_ChienDichTriAn INTO @MaKhachHang, @HoTen, @Email;
+
+-- Vòng lặp duyệt qua từng dòng cho đến khi hết tập dữ liệu (@@FETCH_STATUS = 0)
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    -- Tính tổng chi tiêu của khách hàng này bằng cách gọi Function ở Phần 2
+    SELECT @TongChiTieu = SUM(dbo.fn_TinhTienCanThanhToan(MaDatPhong))
+    FROM DatPhong
+    WHERE MaKhachHang = @MaKhachHang AND TrangThai = N'Đã trả phòng';
+
+    SET @TongChiTieu = ISNULL(@TongChiTieu, 0);
+
+    -- Xử lý logic theo từng dòng: Chỉ in thư tri ân cho khách có chi tiêu
+    IF @TongChiTieu > 0
+    BEGIN
+        PRINT N'Đang gửi email tới: ' + ISNULL(@Email, N'Chưa cập nhật') + N' | Khách hàng: ' + @HoTen;
+        PRINT N'Tổng chi tiêu: ' + CAST(@TongChiTieu AS NVARCHAR) + N' VNĐ';
+        PRINT N'-> Nội dung: Cảm ơn quý khách đã tin tưởng. Tặng mã giảm giá 10% cho lần đặt tiếp theo!';
+        PRINT N'------------------------------------------------------------';
+    END
+
+    -- Tiếp tục lấy dòng tiếp theo
+    FETCH NEXT FROM cur_ChienDichTriAn INTO @MaKhachHang, @HoTen, @Email;
+END
+
+-- BƯỚC 4: CLOSE - Đóng Cursor
+CLOSE cur_ChienDichTriAn;
+
+-- BƯỚC 5: DEALLOCATE - Giải phóng hoàn toàn Cursor khỏi bộ nhớ RAM
+DEALLOCATE cur_ChienDichTriAn;
+GO
+```
+## . Kiểm tra (Test) hoạt động của Cursor
+
+Để chứng minh Cursor hoạt động đúng logic (duyệt tuần tự từng khách hàng và chỉ gửi thông báo cho những ai có tổng chi tiêu > 0), thiết lập kịch bản test bằng cách nạp dữ liệu giả (Mock Data) như sau:
+
+### Bước 1: Chuẩn bị dữ liệu mẫu (Setup Data)
+Tạo 2 khách hàng: một người có lịch sử "Đã trả phòng" (có phát sinh chi tiêu) và một người chỉ mới đăng ký thành viên nhưng chưa từng đặt phòng (chi tiêu = 0).
+```sql
+-- 1. Thêm 2 khách hàng mẫu
+INSERT INTO KhachHang (HoTen, SoDienThoai, Email) 
+VALUES (N'Hoàng Trường Phúc', '0999888777', 'conganh_tnut@gmail.com'),
+       (N'Nguyễn Hoàng Long', '0111222333', 'noni_test@gmail.com');
+
+-- Lấy mã khách hàng vừa tạo để làm dữ liệu đặt phòng
+DECLARE @MaKHTieuTien INT = (SELECT MaKhachHang FROM KhachHang WHERE SoDienThoai = '0999888777');
+
+-- 2. Thêm 1 phòng VIP
+INSERT INTO Phong (SoPhong, LoaiPhong, GiaPhong, TinhTrang)
+VALUES ('VIP-99', N'Phòng VIP', 1500000, N'Trống');
+
+DECLARE @MaPhongVIP INT = (SELECT MaPhong FROM Phong WHERE SoPhong = 'VIP-99');
+
+-- 3. Tạo 1 đơn đặt phòng đã hoàn tất cho khách 'Hoàng Trường Phúc' (Ở 2 ngày, cọc 500k)
+INSERT INTO DatPhong (MaKhachHang, MaPhong, NgayNhanPhong, NgayTraPhong, TienDatCoc, TrangThai)
+VALUES (@MaKHTieuTien, @MaPhongVIP, GETDATE()-2, GETDATE(), 500000, N'Đã trả phòng');
+```
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/fa37739a-d6dd-4b59-b4d5-6ed7c01b08a6" />
+
+Bước 2: Thực thi Cursor và quan sát kết quả
+Sau khi nạp dữ liệu thành công, em tiến hành chạy khối lệnh Cursor ở mục 1. Thay vì nhìn vào bảng kết quả (Results) thông thường, chuyển sang tab Messages trong SSMS để xem quá trình Cursor in tuần tự từng dòng.
+
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/051f295a-d96c-468e-8f9c-6e32dffbb93c" />
+
+
+## 2. So sánh với cách không dùng Cursor (Set-based)
+
+Nếu chỉ xét trên khía cạnh **"Lấy danh sách khách hàng và tổng chi tiêu"** mà không cần hiệu ứng xử lý tuần tự từng dòng (ví dụ: gửi email), thì việc sử dụng các lệnh SQL truyền thống (`SELECT` kết hợp `JOIN`, `GROUP BY`) sẽ cho kết quả tương tự nhưng **ngắn gọn và tối ưu hơn rất nhiều**.
+
+---
+
+### Cách viết không dùng Cursor (Set-based)
+
+```sql
+SELECT 
+    kh.MaKhachHang,
+    kh.HoTen,
+    kh.Email,
+    ISNULL(SUM(dbo.fn_TinhTienCanThanhToan(dp.MaDatPhong)), 0) AS TongChiTieu
+FROM KhachHang kh
+LEFT JOIN DatPhong dp 
+    ON kh.MaKhachHang = dp.MaKhachHang 
+    AND dp.TrangThai = N'Đã trả phòng'
+GROUP BY kh.MaKhachHang, kh.HoTen, kh.Email
+HAVING ISNULL(SUM(dbo.fn_TinhTienCanThanhToan(dp.MaDatPhong)), 0) > 0;
+```
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/9ddf7972-2ec7-4388-a1eb-5c03c439b9be" />
+
+
+
+
+### Bảng đánh giá và so sánh
+
+| Tiêu chí | Dùng Cursor (Row-by-row) | Không dùng Cursor (Set-based) |
+| :--- | :--- | :--- |
+| **Bản chất xử lý** | Duyệt và tính toán từng dòng một | Xử lý toàn bộ tập dữ liệu cùng lúc |
+| **Hiệu năng & tốc độ** | Chậm, tốn RAM & CPU (RBAR) | Rất nhanh, được SQL Server tối ưu |
+| **Độ dài mã nguồn** | Dài, phải theo quy trình nhiều bước | Ngắn gọn, dễ đọc, dễ bảo trì |
+| **Ứng dụng thực tế** | Khi cần xử lý tuần tự: gửi email, gọi API, logic phức tạp từng dòng | Dùng cho truy vấn CRUD, báo cáo, thống kê |
+
+---
+
+### ✅ Kết luận
+
+* 👉 Luôn ưu tiên phương pháp **Set-based** thay vì **Cursor** trong hầu hết các trường hợp.
+* 👉 Chỉ sử dụng **Cursor** khi:
+  * Cần xử lý tuần tự từng dòng.
+  * Có logic phụ thuộc giữa các dòng.
+  * Hoặc phải gọi tác vụ bên ngoài (như gọi API, gửi email, logging phức tạp).
 
